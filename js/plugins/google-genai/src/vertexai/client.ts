@@ -33,6 +33,7 @@ import {
   ListModelsResponse,
   Model,
 } from './types';
+import { calculateApiKey, checkIsSupported } from './utils';
 
 export async function listModels(
   clientOptions: ClientOptions
@@ -42,10 +43,10 @@ export async function listModels(
     resourcePath: 'publishers/google/models',
     clientOptions,
   });
-  const fetchOptions: RequestInit = {
+  const fetchOptions = await getFetchOptions({
     method: 'GET',
-    headers: await getHeaders(clientOptions),
-  };
+    clientOptions,
+  });
   const response = await makeRequest(url, fetchOptions);
   const modelResponse = (await response.json()) as ListModelsResponse;
   return modelResponse.publisherModels;
@@ -62,11 +63,11 @@ export async function generateContent(
     resourceMethod: 'generateContent',
     clientOptions,
   });
-  const fetchOptions: RequestInit = {
+  const fetchOptions = await getFetchOptions({
     method: 'POST',
-    headers: await getHeaders(clientOptions),
+    clientOptions,
     body: JSON.stringify(generateContentRequest),
-  };
+  });
   const response = await makeRequest(url, fetchOptions);
 
   const responseJson = (await response.json()) as GenerateContentResponse;
@@ -84,11 +85,11 @@ export async function generateContentStream(
     resourceMethod: 'streamGenerateContent',
     clientOptions,
   });
-  const fetchOptions: RequestInit = {
+  const fetchOptions = await getFetchOptions({
     method: 'POST',
-    headers: await getHeaders(clientOptions),
+    clientOptions,
     body: JSON.stringify(generateContentRequest),
-  };
+  });
   const response = await makeRequest(url, fetchOptions);
   return processStream(response);
 }
@@ -105,11 +106,11 @@ export async function embedContent(
     clientOptions,
   });
 
-  const fetchOptions: RequestInit = {
+  const fetchOptions = await getFetchOptions({
     method: 'POST',
-    headers: await getHeaders(clientOptions),
+    clientOptions,
     body: JSON.stringify(embedContentRequest),
-  };
+  });
 
   const response = await makeRequest(url, fetchOptions);
   return response.json() as Promise<EmbedContentResponse>;
@@ -127,28 +128,15 @@ export async function imagenPredict(
     clientOptions,
   });
 
-  const fetchOptions: RequestInit = {
+  const fetchOptions = await getFetchOptions({
     method: 'POST',
-    headers: await getHeaders(clientOptions),
+    clientOptions,
     body: JSON.stringify(imagenPredictRequest),
-  };
+  });
 
   const response = await makeRequest(url, fetchOptions);
   return response.json() as Promise<ImagenPredictResponse>;
 }
-
-// TODO(ifielker): update with 'global' and APIKey in the options.
-// See genai SDK for how to handle the apiKey
-//  if (
-//       this.clientOptions.project &&
-//       this.clientOptions.location &&
-//       this.clientOptions.location !== 'global'
-//     ) {
-//       // Regional endpoint
-//       return `https://${this.clientOptions.location}-aiplatform.googleapis.com/`;
-//     }
-//     // Global endpoint (covers 'global' location and API key usage)
-//     return `https://aiplatform.googleapis.com/`;
 
 export function getVertexAIUrl(params: {
   includeProjectAndLocation: boolean; // False for listModels, true for most others
@@ -157,14 +145,24 @@ export function getVertexAIUrl(params: {
   queryParams?: string;
   clientOptions: ClientOptions;
 }): string {
+  checkIsSupported(params);
+
   const DEFAULT_API_VERSION = 'v1beta1';
   const API_BASE_PATH = 'aiplatform.googleapis.com';
 
-  const region = params.clientOptions.location || 'us-central1';
-  const basePath = `${region}-${API_BASE_PATH}`;
+  let basePath: string;
+
+  if (params.clientOptions.kind == 'regional') {
+    basePath = `${params.clientOptions.location}-${API_BASE_PATH}`;
+  } else {
+    basePath = API_BASE_PATH;
+  }
 
   let resourcePath = params.resourcePath;
-  if (params.includeProjectAndLocation) {
+  if (
+    params.clientOptions.kind != 'express' &&
+    params.includeProjectAndLocation
+  ) {
     const parent = `projects/${params.clientOptions.projectId}/locations/${params.clientOptions.location}`;
     resourcePath = `${parent}/${params.resourcePath}`;
   }
@@ -173,24 +171,78 @@ export function getVertexAIUrl(params: {
   if (params.resourceMethod) {
     url += `:${params.resourceMethod}`;
   }
+
+  let joiner = '?';
   if (params.queryParams) {
-    url += `?${params.queryParams}`;
+    url += `${joiner}${params.queryParams}`;
+    joiner = '&';
   }
   if (params.resourceMethod === 'streamGenerateContent') {
-    url += `${params.queryParams ? '&' : '?'}alt=sse`;
+    url += `${joiner}alt=sse`;
+    joiner = '&';
   }
   return url;
 }
 
-async function getHeaders(clientOptions: ClientOptions): Promise<HeadersInit> {
-  const token = await getToken(clientOptions.authClient);
-  const headers: HeadersInit = {
-    Authorization: `Bearer ${token}`,
-    'x-goog-user-project': clientOptions.projectId,
-    'Content-Type': 'application/json',
-    'X-Goog-Api-Client': GENKIT_CLIENT_HEADER,
+async function getFetchOptions(params: {
+  method: 'POST' | 'GET';
+  body?: string;
+  clientOptions: ClientOptions;
+}) {
+  const fetchOptions: RequestInit = {
+    method: params.method,
+    headers: await getHeaders(params.clientOptions),
   };
-  return headers;
+  if (params.body) {
+    fetchOptions.body = params.body;
+  }
+  const signal = getAbortSignal(params.clientOptions);
+  if (signal) {
+    fetchOptions.signal = signal;
+  }
+  return fetchOptions;
+}
+
+function getAbortSignal(clientOptions: ClientOptions): AbortSignal | undefined {
+  const hasTimeout = (clientOptions.timeout ?? -1) >= 0;
+  if (clientOptions.signal !== undefined || hasTimeout) {
+    const controller = new AbortController();
+    if (hasTimeout) {
+      setTimeout(() => controller.abort(), clientOptions.timeout);
+    }
+    if (clientOptions?.signal) {
+      clientOptions.signal.addEventListener('abort', () => {
+        controller.abort();
+      });
+    }
+    return controller.signal;
+  }
+  return undefined;
+}
+
+async function getHeaders(clientOptions: ClientOptions): Promise<HeadersInit> {
+  if (clientOptions.kind == 'express') {
+    const headers: HeadersInit = {
+      'x-goog-api-key': calculateApiKey(clientOptions.apiKey, undefined),
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Client': GENKIT_CLIENT_HEADER,
+      'User-Agent': GENKIT_CLIENT_HEADER,
+    };
+    return headers;
+  } else {
+    const token = await getToken(clientOptions.authClient);
+    const headers: HeadersInit = {
+      Authorization: `Bearer ${token}`,
+      'x-goog-user-project': clientOptions.projectId,
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Client': GENKIT_CLIENT_HEADER,
+      'User-Agent': GENKIT_CLIENT_HEADER,
+    };
+    if (clientOptions.apiKey) {
+      headers['x-goog-api-key'] = clientOptions.apiKey;
+    }
+    return headers;
+  }
 }
 
 async function getToken(authClient: GoogleAuth): Promise<string> {
@@ -554,3 +606,10 @@ function aggregateGroundingMetadataForCandidate(
   }
   return groundingMetadataAggregated;
 }
+
+export const TEST_ONLY = {
+  getFetchOptions,
+  getAbortSignal,
+  getHeaders,
+  makeRequest,
+};

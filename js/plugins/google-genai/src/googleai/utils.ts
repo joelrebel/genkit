@@ -20,8 +20,10 @@ import { VeoImage } from './types.js';
 
 export {
   checkModelName,
+  cleanSchema,
   extractImagenImage,
   extractText,
+  extractVersion,
   modelName,
 } from '../common/utils.js';
 
@@ -43,7 +45,7 @@ export const MISSING_API_KEY_ERROR = new GenkitError({
   status: 'FAILED_PRECONDITION',
   message:
     'Please pass in the API key or set the GEMINI_API_KEY or GOOGLE_API_KEY environment variable.\n' +
-    'For more details see https://firebase.google.com/docs/genkit/plugins/google-genai',
+    'For more details see https://genkit.dev/docs/plugins/google-genai/',
 });
 
 export const API_KEY_FALSE_ERROR = new GenkitError({

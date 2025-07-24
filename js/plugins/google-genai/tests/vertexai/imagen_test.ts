@@ -15,8 +15,9 @@
  */
 
 import * as assert from 'assert';
-import { Genkit } from 'genkit';
+import { GENKIT_CLIENT_HEADER, Genkit } from 'genkit';
 import { GenerateRequest, getBasicUsageStats } from 'genkit/model';
+import { GoogleAuth } from 'google-auth-library';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import * as sinon from 'sinon';
 import { getVertexAIUrl } from '../../src/vertexai/client';
@@ -36,6 +37,11 @@ import {
 import * as utils from '../../src/vertexai/utils';
 
 const { toImagenParameters, fromImagenPrediction } = TEST_ONLY;
+
+// Helper function to escape special characters for use in a RegExp
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+}
 
 describe('Vertex AI Imagen', () => {
   describe('KNOWN_IMAGEN_MODELS', () => {
@@ -76,10 +82,9 @@ describe('Vertex AI Imagen', () => {
     });
 
     it('should handle full model path', () => {
-      const modelName =
-        'projects/my-proj/locations/us-central1/models/imagen-3.0-generate-002';
+      const modelName = 'tunedModels/my-tuned-model';
       const ref = model(modelName);
-      assert.strictEqual(ref.name, 'vertexai/imagen-3.0-generate-002');
+      assert.strictEqual(ref.name, 'vertexai/tunedModels/my-tuned-model');
     });
   });
 
@@ -165,24 +170,31 @@ describe('Vertex AI Imagen', () => {
   describe('defineImagenModel()', () => {
     let mockAi: sinon.SinonStubbedInstance<Genkit>;
     let fetchStub: sinon.SinonStub;
-    const clientOptions: ClientOptions = {
+    const modelName = 'imagen-test-model';
+    let authMock: sinon.SinonStubbedInstance<GoogleAuth>;
+
+    const regionalClientOptions: ClientOptions = {
+      kind: 'regional',
       projectId: 'test-project',
       location: 'us-central1',
-      authClient: {
-        getAccessToken: async () => 'test-token',
-      } as any,
+      authClient: {} as any,
     };
-    const modelName = 'imagen-test-model';
-    const expectedUrl = getVertexAIUrl({
-      includeProjectAndLocation: true,
-      resourcePath: `publishers/google/models/${modelName}`,
-      resourceMethod: 'predict',
-      clientOptions,
-    });
+
+    const globalClientOptions: ClientOptions = {
+      kind: 'global',
+      projectId: 'test-project',
+      location: 'global',
+      authClient: {} as any,
+      apiKey: 'test-api-key',
+    };
 
     beforeEach(() => {
       mockAi = sinon.createStubInstance(Genkit);
       fetchStub = sinon.stub(global, 'fetch');
+      authMock = sinon.createStubInstance(GoogleAuth);
+      authMock.getAccessToken.resolves('test-token');
+      regionalClientOptions.authClient = authMock as unknown as GoogleAuth;
+      globalClientOptions.authClient = authMock as unknown as GoogleAuth;
     });
 
     afterEach(() => {
@@ -198,7 +210,9 @@ describe('Vertex AI Imagen', () => {
       fetchStub.resolves(Promise.resolve(response));
     }
 
-    function captureModelRunner(): (request: GenerateRequest) => Promise<any> {
+    function captureModelRunner(
+      clientOptions: ClientOptions
+    ): (request: GenerateRequest, options: any) => Promise<any> {
       defineModel(mockAi as any, modelName, clientOptions);
       assert.ok(mockAi.defineModel.calledOnce);
       const callArgs = mockAi.defineModel.firstCall.args;
@@ -207,103 +221,145 @@ describe('Vertex AI Imagen', () => {
       return callArgs[1];
     }
 
-    it('should define a model and call fetch successfully', async () => {
-      const request: GenerateRequest<typeof ImagenConfigSchema> = {
-        messages: [{ role: 'user', content: [{ text: 'A cat' }] }],
-        candidates: 2,
-        config: { seed: 42 },
+    function getExpectedHeaders(
+      clientOptions: ClientOptions
+    ): Record<string, string | undefined> {
+      const headers: Record<string, string | undefined> = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Client': GENKIT_CLIENT_HEADER,
+        'User-Agent': GENKIT_CLIENT_HEADER,
+        Authorization: 'Bearer test-token',
+        'x-goog-user-project':
+          clientOptions.kind != 'express' ? clientOptions.projectId : '',
       };
+      if (clientOptions.apiKey) {
+        headers['x-goog-api-key'] = clientOptions.apiKey;
+      }
+      return headers;
+    }
 
-      const mockPrediction: ImagenPrediction = {
-        bytesBase64Encoded: 'abc',
-        mimeType: 'image/png',
-      };
-      const mockResponse: ImagenPredictResponse = {
-        predictions: [mockPrediction, mockPrediction],
-      };
-      mockFetchResponse(mockResponse);
-
-      const modelRunner = captureModelRunner();
-      const result = await modelRunner(request);
-
-      sinon.assert.calledOnce(fetchStub);
-      const fetchArgs = fetchStub.lastCall.args;
-      assert.strictEqual(fetchArgs[0], expectedUrl);
-      assert.strictEqual(fetchArgs[1].method, 'POST');
-      assert.ok(fetchArgs[1].headers['Authorization'].startsWith('Bearer '));
-
-      // Build the expected instance, only adding keys if they have values
-      const prompt = utils.extractText(request);
-      const image = utils.extractImagenImage(request);
-      const mask = utils.extractImagenMask(request);
-
-      const expectedInstance: any = { prompt };
-      if (image !== undefined) expectedInstance.image = image;
-      if (mask !== undefined) expectedInstance.mask = mask;
-
-      const expectedImagenPredictRequest: ImagenPredictRequest = {
-        instances: [expectedInstance],
-        parameters: toImagenParameters(request),
-      };
-
-      assert.deepStrictEqual(
-        JSON.parse(fetchArgs[1].body),
-        expectedImagenPredictRequest
-      );
-
-      const expectedCandidates = mockResponse.predictions!.map((p, i) =>
-        fromImagenPrediction(p, i)
-      );
-      assert.deepStrictEqual(result.candidates, expectedCandidates);
-      assert.deepStrictEqual(result.usage, {
-        ...getBasicUsageStats(request.messages, expectedCandidates),
-        custom: { generations: 2 },
+    function runTestsForClientOptions(clientOptions: ClientOptions) {
+      const expectedUrl = getVertexAIUrl({
+        includeProjectAndLocation: true,
+        resourcePath: `publishers/google/models/${modelName}`,
+        resourceMethod: 'predict',
+        clientOptions,
       });
-      assert.deepStrictEqual(result.custom, mockResponse);
+
+      it(`should define a model and call fetch successfully for ${clientOptions.kind}`, async () => {
+        const request: GenerateRequest<typeof ImagenConfigSchema> = {
+          messages: [{ role: 'user', content: [{ text: 'A cat' }] }],
+          candidates: 2,
+          config: { seed: 42 },
+        };
+
+        const mockPrediction: ImagenPrediction = {
+          bytesBase64Encoded: 'abc',
+          mimeType: 'image/png',
+        };
+        const mockResponse: ImagenPredictResponse = {
+          predictions: [mockPrediction, mockPrediction],
+        };
+        mockFetchResponse(mockResponse);
+
+        const modelRunner = captureModelRunner(clientOptions);
+        const result = await modelRunner(request, {});
+
+        sinon.assert.calledOnce(fetchStub);
+        const fetchArgs = fetchStub.lastCall.args;
+        let actualUrl = fetchArgs[0];
+        assert.strictEqual(actualUrl, expectedUrl);
+        assert.strictEqual(fetchArgs[1].method, 'POST');
+        assert.deepStrictEqual(
+          fetchArgs[1].headers,
+          getExpectedHeaders(clientOptions)
+        );
+
+        const prompt = utils.extractText(request);
+        // extractImagenImage and extractImagenMask return undefined,
+        // so JSON.stringify will omit these keys.
+        const expectedInstance: any = {
+          prompt,
+        };
+        const expectedImagenPredictRequest: ImagenPredictRequest = {
+          instances: [expectedInstance],
+          parameters: toImagenParameters(request),
+        };
+
+        assert.deepStrictEqual(
+          JSON.parse(fetchArgs[1].body),
+          expectedImagenPredictRequest
+        );
+
+        const expectedCandidates = mockResponse.predictions!.map((p, i) =>
+          fromImagenPrediction(p, i)
+        );
+        assert.deepStrictEqual(result.candidates, expectedCandidates);
+        assert.deepStrictEqual(result.usage, {
+          ...getBasicUsageStats(request.messages, expectedCandidates),
+          custom: { generations: 2 },
+        });
+        assert.deepStrictEqual(result.custom, mockResponse);
+      });
+
+      it(`should throw an error if model returns no predictions for ${clientOptions.kind}`, async () => {
+        const request: GenerateRequest = {
+          messages: [{ role: 'user', content: [{ text: 'A dog' }] }],
+        };
+        mockFetchResponse({ predictions: [] });
+
+        const modelRunner = captureModelRunner(clientOptions);
+        await assert.rejects(
+          modelRunner(request, {}),
+          /Model returned no predictions/
+        );
+        sinon.assert.calledOnce(fetchStub);
+      });
+
+      it(`should propagate network errors from fetch for ${clientOptions.kind}`, async () => {
+        const request: GenerateRequest = {
+          messages: [{ role: 'user', content: [{ text: 'A fish' }] }],
+        };
+        const error = new Error('Network Error');
+        fetchStub.rejects(error);
+
+        const modelRunner = captureModelRunner(clientOptions);
+        await assert.rejects(
+          modelRunner(request, {}),
+          new RegExp(
+            `^Error: Failed to fetch from ${escapeRegExp(expectedUrl)}: Network Error`
+          )
+        );
+      });
+
+      it(`should handle API error response for ${clientOptions.kind}`, async () => {
+        const request: GenerateRequest = {
+          messages: [{ role: 'user', content: [{ text: 'A bird' }] }],
+        };
+        const errorMsg = 'Invalid argument';
+        const errorBody = { error: { message: errorMsg, code: 400 } };
+        mockFetchResponse(errorBody, 400);
+
+        const modelRunner = captureModelRunner(clientOptions);
+        let expectedUrlRegex = escapeRegExp(expectedUrl);
+        await assert.rejects(
+          modelRunner(request, {}),
+          new RegExp(
+            `^Error: Failed to fetch from ${expectedUrlRegex}: Error fetching from ${expectedUrlRegex}: \\[400 Error\\] ${errorMsg}`
+          )
+        );
+      });
+    }
+
+    describe('with RegionalClientOptions', () => {
+      runTestsForClientOptions(regionalClientOptions);
     });
 
-    it('should throw an error if model returns no predictions', async () => {
-      const request: GenerateRequest = {
-        messages: [{ role: 'user', content: [{ text: 'A dog' }] }],
-      };
-      mockFetchResponse({ predictions: [] });
-
-      const modelRunner = captureModelRunner();
-      await assert.rejects(
-        modelRunner(request),
-        /Model returned no predictions/
-      );
-      sinon.assert.calledOnce(fetchStub);
+    describe('with GlobalClientOptions', () => {
+      runTestsForClientOptions(globalClientOptions);
     });
 
-    it('should propagate network errors from fetch', async () => {
-      const request: GenerateRequest = {
-        messages: [{ role: 'user', content: [{ text: 'A fish' }] }],
-      };
-      const error = new Error('Network Error');
-      fetchStub.rejects(error);
-
-      const modelRunner = captureModelRunner();
-      await assert.rejects(
-        modelRunner(request),
-        new RegExp(`Failed to fetch from ${expectedUrl}: Network Error`)
-      );
-    });
-
-    it('should handle API error response', async () => {
-      const request: GenerateRequest = {
-        messages: [{ role: 'user', content: [{ text: 'A bird' }] }],
-      };
-      const errorBody = { error: { message: 'Invalid argument', code: 400 } };
-      mockFetchResponse(errorBody, 400);
-
-      const modelRunner = captureModelRunner();
-      await assert.rejects(
-        modelRunner(request),
-        new RegExp(
-          `Error fetching from ${expectedUrl}: \\[400 Error\\] Invalid argument`
-        )
-      );
-    });
+    // ExpressClientOptions does not support Imagen
+    // We have 'does not support' tests elsewhere
   });
 });
