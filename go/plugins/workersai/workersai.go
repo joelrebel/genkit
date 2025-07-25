@@ -92,15 +92,15 @@ func (w *WorkersAI) Name() string {
 
 // Init initializes the Workers AI plugin.
 func (w *WorkersAI) Init(ctx context.Context, g *genkit.Genkit) error {
+	if w == nil {
+		w = &WorkersAI{}
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.initted {
 		return errors.New("Workers AI plugin already initialized")
-	}
-
-	if w == nil {
-		w = &WorkersAI{}
 	}
 
 	// Set API token from environment if not provided
@@ -173,6 +173,10 @@ func (w *WorkersAI) DefineModel(g *genkit.Genkit, name string, info *ai.ModelInf
 		}
 	}
 
+	return w.defineModel(g, name, mi)
+}
+
+func (w *WorkersAI) defineModel(g *genkit.Genkit, name string, info ai.ModelInfo) ai.Model {
 	gen := &generator{
 		model:     name,
 		apiToken:  w.APIToken,
@@ -181,7 +185,7 @@ func (w *WorkersAI) DefineModel(g *genkit.Genkit, name string, info *ai.ModelInf
 		client:    w.httpClient,
 	}
 
-	return genkit.DefineModel(g, provider, name, &mi, gen.generate)
+	return genkit.DefineModel(g, provider, name, &info, gen.generate)
 }
 
 // IsDefinedModel reports whether a model is defined.
