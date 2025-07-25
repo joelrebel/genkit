@@ -140,9 +140,8 @@ func (w *WorkersAI) Init(ctx context.Context, g *genkit.Genkit) error {
 	w.initted = true
 
 	// Register known models
-	models := getKnownModels()
-	for modelName, modelInfo := range models {
-		w.DefineModel(g, modelName, &modelInfo)
+	for modelName, modelInfo := range supportedWorkersAIModels {
+		_ = w.defineModel(g, modelName, modelInfo)
 	}
 
 	return nil
@@ -162,7 +161,7 @@ func (w *WorkersAI) DefineModel(g *genkit.Genkit, name string, info *ai.ModelInf
 		mi = *info
 	} else {
 		mi = ai.ModelInfo{
-			Label:    "Workers AI - " + name,
+			Label: "Workers AI - " + name,
 			Supports: &ai.ModelSupports{
 				Multiturn:  true,
 				SystemRole: true,
@@ -231,7 +230,6 @@ func (gen *generator) generate(ctx context.Context, input *ai.ModelRequest, cb f
 
 	// Make the API request
 	url := fmt.Sprintf("%s/accounts/%s/ai/run/@cf/%s", gen.baseURL, gen.accountID, gen.model)
-
 	jsonData, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -282,7 +280,7 @@ func (gen *generator) handleResponse(resp *http.Response, input *ai.ModelRequest
 		if len(workerResp.Errors) > 0 {
 			errMsg = workerResp.Errors[0].Message
 		}
-		return nil, fmt.Errorf(errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	response := &ai.ModelResponse{
@@ -309,8 +307,7 @@ func (gen *generator) handleStreamingResponse(ctx context.Context, resp *http.Re
 func (w *WorkersAI) ListActions(ctx context.Context) []core.ActionDesc {
 	var actions []core.ActionDesc
 
-	models := getKnownModels()
-	for modelName, modelInfo := range models {
+	for modelName, modelInfo := range supportedWorkersAIModels {
 		metadata := map[string]any{
 			"model": map[string]any{
 				"supports": map[string]any{
@@ -342,7 +339,7 @@ func (w *WorkersAI) ListActions(ctx context.Context) []core.ActionDesc {
 func (w *WorkersAI) ResolveAction(g *genkit.Genkit, atype core.ActionType, name string) error {
 	switch atype {
 	case core.ActionTypeModel:
-		models := getKnownModels()
+		models := supportedWorkersAIModels
 		if modelInfo, exists := models[name]; exists {
 			w.DefineModel(g, name, &modelInfo)
 		} else {
@@ -402,7 +399,7 @@ func buildPrompt(messages []*ai.Message) string {
 // supportsChatFormat returns true if the model supports chat format.
 func supportsChatFormat(model string) bool {
 	return strings.Contains(model, "llama") ||
-		   strings.Contains(model, "mistral") ||
-		   strings.Contains(model, "qwen") ||
-		   strings.Contains(model, "gemma")
+		strings.Contains(model, "mistral") ||
+		strings.Contains(model, "qwen") ||
+		strings.Contains(model, "gemma")
 }
