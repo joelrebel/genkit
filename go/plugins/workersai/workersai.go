@@ -278,8 +278,8 @@ func toClientTools(defs []*ai.ToolDefinition) ([]client.Tool, error) {
 	}
 	return tools, nil
 }
-func toClientMessages(messages []*ai.Message) ([]interface{}, error) {
-	var clientMsgs []interface{}
+func toClientMessages(messages []*ai.Message) ([]client.Message, error) {
+	var clientMsgs []client.Message
 	for _, msg := range messages {
 		switch msg.Role {
 		case ai.RoleTool:

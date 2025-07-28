@@ -117,6 +117,7 @@ func TestToGenkitToolRequestParts(t *testing.T) {
 						"location": "Eindhoven, NL",
 						"unit":     "celsius",
 					},
+					Ref: "call_simple_123",
 				}),
 			},
 			expectError: false,
@@ -140,6 +141,7 @@ func TestToGenkitToolRequestParts(t *testing.T) {
 						"Over":  3.5,
 						"Value": float64(2), // JSON numbers are unmarshaled as float64.
 					},
+					Ref: "call_verbose_456",
 				}),
 			},
 			expectError: false,
@@ -303,6 +305,231 @@ func TestToClientMessages(t *testing.T) {
 					Content:    `{"result":11.31}`,
 					ToolCallID: "tool-call-id-123",
 				},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Tool with only string parameters",
+			input: []*ai.Message{
+				ai.NewUserMessage(ai.NewTextPart("lookup user Jane Doe")),
+				{
+					Role: ai.RoleModel,
+					Content: []*ai.Part{
+						ai.NewToolRequestPart(&ai.ToolRequest{
+							Name:  "lookupUser",
+							Input: map[string]any{"firstName": "Jane", "lastName": "Doe"},
+							Ref:   "lookup-id-456",
+						}),
+					},
+				},
+				{
+					Role: ai.RoleTool,
+					Content: []*ai.Part{
+						ai.NewToolResponsePart(&ai.ToolResponse{
+							Name:   "lookupUser",
+							Output: map[string]any{"status": "found"},
+							Ref:    "lookup-id-456",
+						}),
+					},
+				},
+			},
+			expected: []interface{}{
+				client.ChatMessage{Role: "user", Content: "lookup user Jane Doe"},
+				client.ResponseMessage{
+					Role: "assistant",
+					ToolCalls: []client.ToolCall{{
+						ID:   "lookup-id-456",
+						Type: "function",
+						Function: client.FunctionToCall{
+							Name:      "lookupUser",
+							Arguments: `{"firstName":"Jane","lastName":"Doe"}`,
+						},
+					}},
+				},
+				client.ToolMessage{Role: "tool", Content: `{"status":"found"}`, ToolCallID: "lookup-id-456"},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Tool with mixed primitive types",
+			input: []*ai.Message{
+				ai.NewUserMessage(ai.NewTextPart("create an alert for 'server-down' with priority 1 and silent false")),
+				{
+					Role: ai.RoleModel,
+					Content: []*ai.Part{
+						ai.NewToolRequestPart(&ai.ToolRequest{
+							Name: "createAlert",
+							Input: map[string]any{
+								"name":     "server-down",
+								"priority": 1,
+								"silent":   false,
+							},
+							Ref: "alert-id-789",
+						}),
+					},
+				},
+				{
+					Role: ai.RoleTool,
+					Content: []*ai.Part{
+						ai.NewToolResponsePart(&ai.ToolResponse{
+							Name:   "createAlert",
+							Output: map[string]any{"alertId": "xyz-123", "status": "created"},
+							Ref:    "alert-id-789",
+						}),
+					},
+				},
+			},
+			expected: []interface{}{
+				client.ChatMessage{Role: "user", Content: "create an alert for 'server-down' with priority 1 and silent false"},
+				client.ResponseMessage{
+					Role: "assistant",
+					ToolCalls: []client.ToolCall{{
+						ID:   "alert-id-789",
+						Type: "function",
+						Function: client.FunctionToCall{
+							Name:      "createAlert",
+							Arguments: `{"name":"server-down","priority":1,"silent":false}`,
+						},
+					}},
+				},
+				client.ToolMessage{Role: "tool", Content: `{"alertId":"xyz-123","status":"created"}`, ToolCallID: "alert-id-789"},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Tool with nested object parameter",
+			input: []*ai.Message{
+				ai.NewUserMessage(ai.NewTextPart("update user config with theme dark and notifications enabled")),
+				{
+					Role: ai.RoleModel,
+					Content: []*ai.Part{
+						ai.NewToolRequestPart(&ai.ToolRequest{
+							Name: "updateConfig",
+							Input: map[string]any{
+								"userId": "user-1",
+								"config": map[string]any{
+									"theme":         "dark",
+									"notifications": true,
+								},
+							},
+							Ref: "config-id-abc",
+						}),
+					},
+				},
+				{
+					Role: ai.RoleTool,
+					Content: []*ai.Part{
+						ai.NewToolResponsePart(&ai.ToolResponse{
+							Name:   "updateConfig",
+							Output: map[string]any{"status": "success"},
+							Ref:    "config-id-abc",
+						}),
+					},
+				},
+			},
+			expected: []interface{}{
+				client.ChatMessage{Role: "user", Content: "update user config with theme dark and notifications enabled"},
+				client.ResponseMessage{
+					Role: "assistant",
+					ToolCalls: []client.ToolCall{{
+						ID:   "config-id-abc",
+						Type: "function",
+						Function: client.FunctionToCall{
+							Name:      "updateConfig",
+							Arguments: `{"config":{"notifications":true,"theme":"dark"},"userId":"user-1"}`,
+						},
+					}},
+				},
+				client.ToolMessage{Role: "tool", Content: `{"status":"success"}`, ToolCallID: "config-id-abc"},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Tool with array of strings",
+			input: []*ai.Message{
+				ai.NewUserMessage(ai.NewTextPart("add tags 'urgent' and 'review' to ticket 123")),
+				{
+					Role: ai.RoleModel,
+					Content: []*ai.Part{
+						ai.NewToolRequestPart(&ai.ToolRequest{
+							Name:  "addTags",
+							Input: map[string]any{"ticketId": 123, "tags": []string{"urgent", "review"}},
+							Ref:   "tags-id-def",
+						}),
+					},
+				},
+				{
+					Role: ai.RoleTool,
+					Content: []*ai.Part{
+						ai.NewToolResponsePart(&ai.ToolResponse{
+							Name:   "addTags",
+							Output: map[string]any{"updated": true},
+							Ref:    "tags-id-def",
+						}),
+					},
+				},
+			},
+			expected: []interface{}{
+				client.ChatMessage{Role: "user", Content: "add tags 'urgent' and 'review' to ticket 123"},
+				client.ResponseMessage{
+					Role: "assistant",
+					ToolCalls: []client.ToolCall{{
+						ID:   "tags-id-def",
+						Type: "function",
+						Function: client.FunctionToCall{
+							Name:      "addTags",
+							Arguments: `{"tags":["urgent","review"],"ticketId":123}`,
+						},
+					}},
+				},
+				client.ToolMessage{Role: "tool", Content: `{"updated":true}`, ToolCallID: "tags-id-def"},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Multiple tool calls in a single turn",
+			input: []*ai.Message{
+				ai.NewUserMessage(ai.NewTextPart("Find user 'jdoe' and get their last login.")),
+				{
+					Role: ai.RoleModel,
+					Content: []*ai.Part{
+						ai.NewToolRequestPart(&ai.ToolRequest{
+							Name: "findUser", Input: map[string]any{"username": "jdoe"}, Ref: "multi-id-1",
+						}),
+						ai.NewToolRequestPart(&ai.ToolRequest{
+							Name: "getLastLogin", Input: map[string]any{"userId": "user-456"}, Ref: "multi-id-2",
+						}),
+					},
+				},
+				{
+					Role: ai.RoleTool,
+					Content: []*ai.Part{
+						ai.NewToolResponsePart(&ai.ToolResponse{
+							Name: "findUser", Output: map[string]any{"userId": "user-456"}, Ref: "multi-id-1",
+						}),
+						ai.NewToolResponsePart(&ai.ToolResponse{
+							Name: "getLastLogin", Output: map[string]any{"timestamp": "2025-07-28T14:30:00Z"}, Ref: "multi-id-2",
+						}),
+					},
+				},
+			},
+			expected: []interface{}{
+				client.ChatMessage{Role: "user", Content: "Find user 'jdoe' and get their last login."},
+				client.ResponseMessage{
+					Role: "assistant",
+					ToolCalls: []client.ToolCall{
+						{
+							ID: "multi-id-1", Type: "function",
+							Function: client.FunctionToCall{Name: "findUser", Arguments: `{"username":"jdoe"}`},
+						},
+						{
+							ID: "multi-id-2", Type: "function",
+							Function: client.FunctionToCall{Name: "getLastLogin", Arguments: `{"userId":"user-456"}`},
+						},
+					},
+				},
+				client.ToolMessage{Role: "tool", Content: `{"userId":"user-456"}`, ToolCallID: "multi-id-1"},
+				client.ToolMessage{Role: "tool", Content: `{"timestamp":"2025-07-28T14:30:00Z"}`, ToolCallID: "multi-id-2"},
 			},
 			expectErr: false,
 		},

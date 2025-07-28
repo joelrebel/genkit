@@ -25,7 +25,6 @@ require (
 	github.com/invopop/jsonschema v0.13.0
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/jba/slog v0.2.0
-	github.com/kortschak/utter v1.7.0
 	github.com/lib/pq v1.10.9
 	github.com/mark3labs/mcp-go v0.29.0
 	github.com/pgvector/pgvector-go v0.3.0
