@@ -140,6 +140,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/firebase/genkit/go => .
-
-replace github.com/ashishdatta/workers-ai-golang => ../../workers-ai-golang
+// TODO: remove once PR is merged and release is tagged
+// https://github.com/ashishdatta/workers-ai-golang/pull/1
+//
+replace github.com/ashishdatta/workers-ai-golang => ../workers-ai-golang
