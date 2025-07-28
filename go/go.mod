@@ -16,7 +16,7 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.52.0
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.27.0
 	github.com/anthropics/anthropic-sdk-go v1.4.0
-	github.com/ashishdatta/workers-ai-golang v0.1.0
+	github.com/ashishdatta/workers-ai-golang v0.1.1
 	github.com/blues/jsonata-go v1.5.4
 	github.com/goccy/go-yaml v1.17.1
 	github.com/google/dotprompt/go v0.0.0-20250611200215-bb73406b05ca
@@ -139,8 +139,3 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// TODO: remove once PR is merged and release is tagged
-// https://github.com/ashishdatta/workers-ai-golang/pull/1
-//
-replace github.com/ashishdatta/workers-ai-golang => ../workers-ai-golang
