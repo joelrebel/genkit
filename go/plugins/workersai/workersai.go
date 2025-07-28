@@ -239,6 +239,7 @@ func toGenkitToolRequestParts(calls []client.ToolCall) ([]*ai.Part, error) {
 
 		// Create the ToolRequest struct that Genkit expects.
 		tr := &ai.ToolRequest{
+			Ref:   call.ID,
 			Name:  call.Function.Name,
 			Input: simplifiedArgs,
 		}
@@ -277,19 +278,14 @@ func toClientTools(defs []*ai.ToolDefinition) ([]client.Tool, error) {
 	}
 	return tools, nil
 }
-
-// toClientMessages converts Genkit messages to the client library's format.
 func toClientMessages(messages []*ai.Message) ([]interface{}, error) {
 	var clientMsgs []interface{}
 	for _, msg := range messages {
-		// Handle tool response messages by creating a `client.ToolMessage` for each ToolResponsePart.
-		if msg.Role == ai.RoleTool {
+		switch msg.Role {
+		case ai.RoleTool:
+			// Handle the tool's response.
 			for _, part := range msg.Content {
 				if part.IsToolResponse() {
-					// The ToolCallID is crucial. We assume the ToolResponse's Name field
-					// corresponds to the ID required by the API, which is a common convention
-					// when the explicit ID isn't tracked through the framework.
-
 					outputBytes, err := json.Marshal(part.ToolResponse.Output)
 					if err != nil {
 						return nil, errors.Wrapf(err, "failed to marshal tool output for %s", part.ToolResponse.Name)
@@ -298,18 +294,53 @@ func toClientMessages(messages []*ai.Message) ([]interface{}, error) {
 					clientMsgs = append(clientMsgs, client.ToolMessage{
 						Role:       "tool",
 						Content:    string(outputBytes),
-						ToolCallID: part.ToolResponse.Name,
+						ToolCallID: part.ToolResponse.Ref, // Read the ID back from Ref
 					})
 				}
 			}
-			continue
-		}
+		case ai.RoleModel:
+			// Handle the assistant's previous message (the tool request).
+			var toolCalls []client.ToolCall
+			for _, part := range msg.Content {
+				if part.IsToolRequest() {
+					// We must convert Genkit's request back to the client library's format.
+					// This is crucial for maintaining conversation history.
+					argsBytes, err := json.Marshal(part.ToolRequest.Input)
+					if err != nil {
+						return nil, errors.Wrapf(err, "failed to marshal tool input for %s", part.ToolRequest.Name)
+					}
+					toolCalls = append(toolCalls, client.ToolCall{
+						ID:   part.ToolRequest.Ref, // Pass the ID along
+						Type: "function",
+						Function: client.FunctionToCall{
+							Name:      part.ToolRequest.Name,
+							Arguments: string(argsBytes),
+						},
+					})
+				}
+			}
+			// Add the assistant message with its tool calls to the history.
+			if len(toolCalls) > 0 {
+				clientMsgs = append(clientMsgs, client.ResponseMessage{
+					Role:      "assistant",
+					ToolCalls: toolCalls,
+				})
+			}
+			// If it's a simple text response from the model, handle that too.
+			if msg.Text() != "" {
+				clientMsgs = append(clientMsgs, client.ChatMessage{
+					Role:    "assistant",
+					Content: msg.Text(),
+				})
+			}
 
-		// Handle standard user, system, or assistant messages.
-		clientMsgs = append(clientMsgs, client.ChatMessage{
-			Role:    convertRole(msg.Role),
-			Content: msg.Text(),
-		})
+		case ai.RoleUser, ai.RoleSystem:
+			// Handle standard user or system messages.
+			clientMsgs = append(clientMsgs, client.ChatMessage{
+				Role:    convertRole(msg.Role),
+				Content: msg.Text(),
+			})
+		}
 	}
 	return clientMsgs, nil
 }

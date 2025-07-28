@@ -29,7 +29,8 @@ func TestWorkersAILive(t *testing.T) {
 
 	g, err := genkit.Init(ctx,
 		genkit.WithPlugins(&WorkersAI{}),
-		// genkit.WithDefaultModel("workersai/@cf/mistralai/mistral-small-3.1-24b-instruct"),
+		// TODO: doesn't work with the mistralai model
+		//genkit.WithDefaultModel("workersai/@cf/mistralai/mistral-small-3.1-24b-instruct"),
 		genkit.WithDefaultModel("workersai/@cf/meta/llama-4-scout-17b-16e-instruct"),
 	)
 	if err != nil {
@@ -209,113 +210,165 @@ func TestToGenkitToolRequestParts(t *testing.T) {
 	}
 }
 
+// TestToClientMessages uses a table-driven approach to validate the conversion
+// of Genkit messages to the format expected by the Workers AI client library.
 func TestToClientMessages(t *testing.T) {
-	t.Run("should correctly construct history for a full tool-calling cycle", func(t *testing.T) {
-		// Arrange: A full conversation history for a tool call.
-		toolCallID := "call_123"
-		toolName := "get_weather"
-
-		genkitHistory := []*ai.Message{
-			// 1. User asks a question.
-			{Role: ai.RoleUser, Content: []*ai.Part{ai.NewTextPart("What's the weather in Eindhoven?")}},
-			// 2. Model requests a tool call. The ID is stored in the Input map.
-			{
-				Role: ai.RoleModel,
-				Content: []*ai.Part{
-					ai.NewToolRequestPart(&ai.ToolRequest{
-						Name: toolName,
-						Input: map[string]any{
-							"__genkit_tool_call_id": toolCallID, // Our special key for the ID.
-							"location":              "Eindhoven",
+	// Define the structure for our test cases
+	testCases := []struct {
+		name      string
+		input     []*ai.Message
+		expected  []interface{}
+		expectErr bool
+	}{
+		{
+			name: "Simple user message",
+			input: []*ai.Message{
+				ai.NewUserMessage(ai.NewTextPart("Hello, world!")),
+			},
+			expected: []interface{}{
+				client.ChatMessage{Role: "user", Content: "Hello, world!"},
+			},
+			expectErr: false,
+		},
+		{
+			name: "User and system messages",
+			input: []*ai.Message{
+				ai.NewSystemMessage(ai.NewTextPart("You are a helpful assistant.")),
+				ai.NewUserMessage(ai.NewTextPart("What is Go?")),
+			},
+			expected: []interface{}{
+				client.ChatMessage{Role: "system", Content: "You are a helpful assistant."},
+				client.ChatMessage{Role: "user", Content: "What is Go?"},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Simple model (assistant) response",
+			input: []*ai.Message{
+				ai.NewModelMessage(ai.NewTextPart("Go is a programming language.")),
+			},
+			expected: []interface{}{
+				client.ChatMessage{Role: "assistant", Content: "Go is a programming language."},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Full tool call and response sequence",
+			input: []*ai.Message{
+				// 1. User asks to use a tool
+				ai.NewUserMessage(ai.NewTextPart("what is a gablorken of 2 over 3.5?")),
+				// 2. Model responds with a request to call the tool
+				{
+					Role: ai.RoleModel,
+					Content: []*ai.Part{
+						ai.NewToolRequestPart(&ai.ToolRequest{
+							Name:  "gablorken",
+							Input: map[string]any{"Value": 2, "Over": 3.5},
+							Ref:   "tool-call-id-123", // The crucial ID
+						}),
+					},
+				},
+				// 3. The tool is executed and the result is sent back
+				{
+					Role: ai.RoleTool,
+					Content: []*ai.Part{
+						ai.NewToolResponsePart(&ai.ToolResponse{
+							Name:   "gablorken",
+							Output: map[string]any{"result": 11.31},
+							Ref:    "tool-call-id-123", // The same ID is passed back
+						}),
+					},
+				},
+			},
+			expected: []interface{}{
+				// User message
+				client.ChatMessage{Role: "user", Content: "what is a gablorken of 2 over 3.5?"},
+				// Assistant message with the tool call request
+				client.ResponseMessage{
+					Role: "assistant",
+					ToolCalls: []client.ToolCall{
+						{
+							ID:   "tool-call-id-123",
+							Type: "function",
+							Function: client.FunctionToCall{
+								Name:      "gablorken",
+								Arguments: `{"Over":3.5,"Value":2}`,
+							},
 						},
-					}),
+					},
+				},
+				// Tool result message
+				client.ToolMessage{
+					Role:       "tool",
+					Content:    `{"result":11.31}`,
+					ToolCallID: "tool-call-id-123",
 				},
 			},
-			// 3. We provide the tool's response.
-			{
-				Role: ai.RoleTool,
-				Content: []*ai.Part{
-					ai.NewToolResponsePart(&ai.ToolResponse{
-						Name:   toolName, // The simple name.
-						Output: map[string]any{"temp": "15C"},
-					}),
+			expectErr: false,
+		},
+		{
+			name: "Error on unmarshalable tool response output",
+			input: []*ai.Message{
+				{
+					Role: ai.RoleTool,
+					Content: []*ai.Part{
+						ai.NewToolResponsePart(&ai.ToolResponse{
+							Name:   "badTool",
+							Ref:    "bad-id-1",
+							Output: make(chan int), // This type cannot be marshaled to JSON
+						}),
+					},
 				},
 			},
-		}
+			expected:  nil,
+			expectErr: true,
+		},
+	}
 
-		// Act: Call the function to convert this history for the API.
-		clientMsgs, err := toClientMessages(genkitHistory)
-		require.NoError(t, err)
-		require.Len(t, clientMsgs, 3)
+	// Run the test cases
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Use require for assertions, which stops the test on failure.
+			r := require.New(t)
 
-		// Assert: Check each message in the constructed history.
+			got, err := toClientMessages(tc.input)
 
-		// 1. User message should be correct.
-		userMsg, ok := clientMsgs[0].(client.ChatMessage)
-		require.True(t, ok)
-		assert.Equal(t, "user", userMsg.Role)
-		assert.Equal(t, "What's the weather in Eindhoven?", userMsg.Content)
+			if tc.expectErr {
+				r.Error(err)
+				return // Test ends here if an error is expected.
+			}
 
-		// 2. Assistant message should be reconstructed with the tool call.
-		assistantMsg, ok := clientMsgs[1].(client.ChatMessage)
-		require.True(t, ok)
-		assert.Equal(t, "assistant", assistantMsg.Role)
-		require.Len(t, assistantMsg.ToolCalls, 1)
-		assert.Equal(t, toolCallID, assistantMsg.ToolCalls[0].ID)
-		assert.Equal(t, toolName, assistantMsg.ToolCalls[0].Function.Name)
-		// The special ID key should have been removed from the arguments.
-		assert.JSONEq(t, `{"location": "Eindhoven"}`, assistantMsg.ToolCalls[0].Function.Arguments)
+			r.NoError(err)
+			r.NotNil(got)
+			r.Len(got, len(tc.expected))
 
-		// 3. Tool message should be reconstructed with the correct ID and content.
-		toolMsg, ok := clientMsgs[2].(client.ToolMessage)
-		require.True(t, ok)
-		assert.Equal(t, "tool", toolMsg.Role)
-		assert.Equal(t, toolCallID, toolMsg.ToolCallID)
-		assert.JSONEq(t, `{"temp":"15C"}`, toolMsg.Content)
-	})
+			// Compare each message, handling the special case for tool calls.
+			for i := range tc.expected {
+				expectedMsg := tc.expected[i]
+				gotMsg := got[i]
 
-	t.Run("should handle simple text messages", func(t *testing.T) {
-		// Arrange
-		genkitHistory := []*ai.Message{
-			{Role: ai.RoleUser, Content: []*ai.Part{ai.NewTextPart("Hello")}},
-			{Role: ai.RoleModel, Content: []*ai.Part{ai.NewTextPart("Hi there!")}},
-		}
+				// The ResponseMessage contains tool calls with JSON strings that need special handling.
+				if expectedResp, ok := expectedMsg.(client.ResponseMessage); ok {
+					gotResp, ok := gotMsg.(client.ResponseMessage)
+					r.True(ok, "expected message type client.ResponseMessage, but got %T", gotMsg)
 
-		// Act
-		clientMsgs, err := toClientMessages(genkitHistory)
-		require.NoError(t, err)
-		require.Len(t, clientMsgs, 2)
+					r.Equal(expectedResp.Role, gotResp.Role)
+					r.Len(gotResp.ToolCalls, len(expectedResp.ToolCalls))
 
-		// Assert
-		userMsg, ok := clientMsgs[0].(client.ChatMessage)
-		require.True(t, ok)
-		assert.Equal(t, "user", userMsg.Role)
-		assert.Equal(t, "Hello", userMsg.Content)
-
-		assistantMsg, ok := clientMsgs[1].(client.ChatMessage)
-		require.True(t, ok)
-		assert.Equal(t, "assistant", assistantMsg.Role)
-		assert.Equal(t, "Hi there!", assistantMsg.Content)
-	})
-
-	t.Run("should return error if tool response appears without a preceding request", func(t *testing.T) {
-		// Arrange: A tool response with no prior model request in the history.
-		genkitHistory := []*ai.Message{
-			{Role: ai.RoleUser, Content: []*ai.Part{ai.NewTextPart("Hello")}},
-			{
-				Role: ai.RoleTool,
-				Content: []*ai.Part{
-					ai.NewToolResponsePart(&ai.ToolResponse{
-						Name:   "get_weather",
-						Output: "15C",
-					}),
-				},
-			},
-		}
-
-		// Act & Assert
-		_, err := toClientMessages(genkitHistory)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "could not find tool_call_id for tool response")
-	})
+					for j, expectedCall := range expectedResp.ToolCalls {
+						gotCall := gotResp.ToolCalls[j]
+						// Compare basic fields
+						r.Equal(expectedCall.ID, gotCall.ID)
+						r.Equal(expectedCall.Type, gotCall.Type)
+						r.Equal(expectedCall.Function.Name, gotCall.Function.Name)
+						// Use JSONEq to compare arguments, ignoring key order and whitespace.
+						r.JSONEq(expectedCall.Function.Arguments, gotCall.Function.Arguments)
+					}
+				} else {
+					// For all other message types, a direct comparison is sufficient.
+					r.Equal(expectedMsg, gotMsg)
+				}
+			}
+		})
+	}
 }
